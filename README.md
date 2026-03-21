@@ -1,0 +1,2 @@
+# Loot-assets
+loot
