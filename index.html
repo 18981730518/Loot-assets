@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>婺源交互艺术：雷暴掌控 (实景监控常驻版)</title>
+    <style>
+        body, html {
+            margin: 0; padding: 0; overflow: hidden; background-color: #000;
+            font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+        }
+        #hidden-video { display: none; }
+        #webgl-canvas { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; }
+        
+        /* 默认隐藏的 UI 容器组 */
+        .debug-ui {
+            display: none; /* 默认隐藏，按 'H' 键唤出 */
+        }
+
+        /* 摄像头画面与骨骼画布叠放在一起 (常驻显示) */
+        .camera-container {
+            position: absolute; bottom: 20px; right: 20px; width: 240px; height: 180px;
+            z-index: 2; border: 2px solid rgba(255, 255, 255, 0.4); border-radius: 8px;
+            overflow: hidden; background-color: rgba(0, 0, 0, 0.8);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            transition: opacity 0.3s;
+        }
+        #webcam-video {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* 镜像显示 */
+        }
+        #debug-canvas {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            transform: scaleX(-1); /* 镜像显示骨骼 */
+        }
+
+        #ui-text {
+            position: absolute; bottom: 30px; left: 30px; color: rgba(255, 255, 255, 0.95);
+            z-index: 2; text-shadow: 0px 2px 6px rgba(0,0,0,0.9); pointer-events: none; max-width: 480px;
+        }
+        h2 { margin-top: 0; margin-bottom: 10px; font-weight: 500; letter-spacing: 2px;}
+        p { margin: 8px 0; font-size: 15px; line-height: 1.6;}
+        
+        #mask-debugger {
+            position: absolute; top: 20px; left: 20px; background: rgba(0, 0, 0, 0.65);
+            border: 1px solid rgba(255,255,255,0.3); border-radius: 8px; padding: 15px 20px;
+            color: white; z-index: 10; backdrop-filter: blur(8px); font-size: 13px;
+        }
+        #mask-debugger h3 { margin: 0 0 12px 0; font-size: 15px; color: #ffdd57; letter-spacing: 1px;}
+        .control-group { margin-bottom: 12px; }
+        .control-group label { display: flex; justify-content: space-between; margin-bottom: 6px; color: #ddd;}
+        .control-group input[type="range"] { width: 100%; cursor: pointer; }
+
+        #start-overlay {
+            position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,1.0);
+            z-index: 20; display: flex; justify-content: center; align-items: center; flex-direction: column;
+            color: white; font-size: 24px; cursor: pointer; transition: opacity 1.0s; letter-spacing: 2px;
+        }
+        #start-overlay span { font-size: 14px; margin-top: 15px; color: #666; }
+    </style>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="start-overlay">
+        唤 醒
+        <span>Touch to Wake</span>
+    </div>
+    
+    <video id="hidden-video" src="wuyuan.mp4" loop muted playsinline crossorigin="anonymous"></video>
+    <canvas id="webgl-canvas"></canvas>
+    
+    <div class="camera-container">
+        <video id="webcam-video" autoplay playsinline></video>
+        <canvas id="debug-canvas" width="640" height="480"></canvas>
+    </div>
+
+    <div id="mask-debugger" class="debug-ui">
+        <h3>环境光影调试器 (监控模式)</h3>
+        <p style="font-size: 12px; color: #aaa; margin-top: 0;">按 'H' 键隐藏此面板</p>
+        <div class="control-group">
+            <label>地平线位置 (Horizon Y) <span id="val-y">0.77</span></label>
+            <input type="range" id="slider-y" min="0" max="1" step="0.01" value="0.77">
+        </div>
+        <div class="control-group">
+            <label>遮罩柔和度 (Softness) <span id="val-soft">0.42</span></label>
+            <input type="range" id="slider-soft" min="0" max="1" step="0.01" value="0.42">
+        </div>
+        <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.2); margin: 15px 0;">
+        <div class="control-group">
+            <label>地景极限明度 (Ground) <span id="val-gb">0.75</span></label>
+            <input type="range" id="slider-gb" min="0.1" max="1.0" step="0.01" value="0.75">
+        </div>
+        <div class="control-group">
+            <label>天空极限明度 (Sky) <span id="val-sb">0.43</span></label>
+            <input type="range" id="slider-sb" min="0.1" max="1.0" step="0.01" value="0.43">
+        </div>
+    </div>
+
+    <div id="ui-text" class="debug-ui">
+        <h2>婺源：雷暴掌控</h2>
+        <p id="status-text" style="color: #ffdd57;">系统运行中...</p>
+        <p>👐 <b>左手：</b> 张开召唤风雨，握拳平息。</p>
+        <p>👌 <b>右手：</b> 捏合引爆雷霆。</p>
+    </div>
+
+    <script>
+        // ==========================================
+        // UI 隐藏/显示 快捷键逻辑 (创作者后门)
+        // ==========================================
+        document.addEventListener('keydown', (e) => {
+            if (e.key.toLowerCase() === 'h') {
+                const debugElements = document.querySelectorAll('.debug-ui');
+                debugElements.forEach(el => {
+                    const isHidden = window.getComputedStyle(el).display === 'none';
+                    el.style.display = isHidden ? 'block' : 'none';
+                });
+            }
+        });
+
+        // ==========================================
+        // 0. 初始化与音頻系统
+        // ==========================================
+        const startOverlay = document.getElementById('start-overlay');
+        const videoElement = document.getElementById('hidden-video');
+        let audioContextStarted = false;
+
+        const canvas = document.getElementById('webgl-canvas');
+        const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.autoClear = false; 
+
+        const rainCamera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        rainCamera.position.z = 5;
+        const listener = new THREE.AudioListener();
+        rainCamera.add(listener);
+        
+        const rainSound = new THREE.Audio(listener);
+        const thunderSound = new THREE.Audio(listener);
+        const audioLoader = new THREE.AudioLoader();
+        
+        audioLoader.load('light_rain.mp3', function(buffer) {
+            rainSound.setBuffer(buffer);
+            rainSound.setLoop(true);
+            rainSound.setVolume(0);
+            rainSound.play();
+        });
+        
+        audioLoader.load('thunder_clap.mp3', function(buffer) {
+            thunderSound.setBuffer(buffer);
+            thunderSound.setLoop(false);
+            thunderSound.setVolume(1.0); 
+        });
+
+        startOverlay.addEventListener('click', () => {
+            if (!audioContextStarted && listener.context.state === 'suspended') {
+                listener.context.resume();
+            }
+            audioContextStarted = true;
+            videoElement.play(); 
+            startOverlay.style.opacity = '0';
+            setTimeout(() => startOverlay.style.display = 'none', 1000); 
+        });
+
+        // ==========================================
+        // 1. 视频背景调色系统
+        // ==========================================
+        const bgScene = new THREE.Scene();
+        const bgCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        const videoTexture = new THREE.VideoTexture(videoElement);
+        videoTexture.minFilter = THREE.LinearFilter;
+        videoTexture.magFilter = THREE.LinearFilter;
+        videoTexture.format = THREE.RGBFormat;
+
+        const bgMaterial = new THREE.ShaderMaterial({
+            uniforms: {
+                tVideo: { value: videoTexture },
+                uRainLevel: { value: 0.0 }, 
+                uHorizonY: { value: 0.77 },      
+                uBlendSoftness: { value: 0.42 }, 
+                uGroundDarkness: { value: 0.75 },
+                uSkyDarkness: { value: 0.43 },   
+                uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+                uVideoResolution: { value: new THREE.Vector2(1920, 1080) } 
+            },
+            vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }`,
+            fragmentShader: `
+                uniform sampler2D tVideo;
+                uniform float uRainLevel;
+                uniform float uHorizonY;
+                uniform float uBlendSoftness;
+                uniform float uGroundDarkness;
+                uniform float uSkyDarkness;
+                uniform vec2 uResolution;
+                uniform vec2 uVideoResolution;
+                varying vec2 vUv;
+
+                void main() {
+                    float rs = uResolution.x / uResolution.y;
+                    float rv = uVideoResolution.x / uVideoResolution.y;
+                    vec2 videoUv = vUv;
+                    if (rs > rv) {
+                        videoUv.y = (vUv.y - 0.5) * (rv / rs) + 0.5;
+                    } else {
+                        videoUv.x = (vUv.x - 0.5) * (rs / rv) + 0.5;
+                    }
+                    
+                    vec4 texColor = texture2D(tVideo, videoUv);
+                    
+                    float skyMask = smoothstep(uHorizonY - uBlendSoftness, uHorizonY + uBlendSoftness, videoUv.y);
+                    vec3 targetGround = texColor.rgb * uGroundDarkness; 
+                    vec3 targetSky = texColor.rgb * uSkyDarkness; 
+
+                    vec3 stormyColor = mix(targetGround, targetSky, skyMask);
+                    vec3 finalColor = mix(texColor.rgb, stormyColor, uRainLevel);
+                    
+                    gl_FragColor = vec4(finalColor, 1.0);
+                }
+            `,
+            depthWrite: false
+        });
+
+        videoElement.addEventListener('loadedmetadata', () => {
+            bgMaterial.uniforms.uVideoResolution.value.set(videoElement.videoWidth, videoElement.videoHeight);
+        });
+        const bgPlane = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMaterial);
+        bgScene.add(bgPlane);
+
+        // UI 滑块绑定
+        const bindSlider = (id, uniformKey, valId) => {
+            document.getElementById(id).addEventListener('input', (e) => {
+                const v = parseFloat(e.target.value);
+                document.getElementById(valId).innerText = v.toFixed(2);
+                bgMaterial.uniforms[uniformKey].value = v;
+                if (targetRainLevel < 0.5) targetRainLevel = 0.5; 
+            });
+        };
+        bindSlider('slider-y', 'uHorizonY', 'val-y');
+        bindSlider('slider-soft', 'uBlendSoftness', 'val-soft');
+        bindSlider('slider-gb', 'uGroundDarkness', 'val-gb');
+        bindSlider('slider-sb', 'uSkyDarkness', 'val-sb');
+
+        // ==========================================
+        // 2. 暴雨粒子 & 強力閃電系统
+        // ==========================================
+        const rainScene = new THREE.Scene();
+
+        const rainCount = 100000; 
+        const rainGeometry = new THREE.BufferGeometry();
+        const rainPositions = new Float32Array(rainCount * 3);
+        const rainVelocities = new Float32Array(rainCount);
+
+        for (let i = 0; i < rainCount; i++) {
+            rainPositions[i * 3] = (Math.random() - 0.5) * 30; 
+            rainPositions[i * 3 + 1] = Math.random() * 20 - 10; 
+            rainPositions[i * 3 + 2] = (Math.random() - 0.5) * 15; 
+            rainVelocities[i] = 0.2 + Math.random() * 0.15; 
+        }
+        rainGeometry.setAttribute('position', new THREE.BufferAttribute(rainPositions, 3));
+        rainGeometry.setAttribute('velocity', new THREE.BufferAttribute(rainVelocities, 1));
+
+        const rainRainMaterial = new THREE.ShaderMaterial({
+            uniforms: { uColor: { value: new THREE.Color(0xbccdd9) }, uOpacity: { value: 0.0 } },
+            vertexShader: `
+                attribute float velocity;
+                void main() {
+                    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                    gl_PointSize = 30.0 * (10.0 / -mvPosition.z);
+                    gl_Position = projectionMatrix * mvPosition;
+                }
+            `,
+            fragmentShader: `
+                uniform vec3 uColor; uniform float uOpacity;
+                void main() {
+                    vec2 coord = gl_PointCoord - vec2(0.5); 
+                    if (abs(coord.x) > 0.015) discard;
+                    float alpha = 1.0 - (abs(coord.y) * 2.0);
+                    gl_FragColor = vec4(uColor, uOpacity * alpha * 0.15);
+                }
+            `,
+            transparent: true, depthWrite: false, blending: THREE.AdditiveBlending 
+        });
+        const rainSystem = new THREE.Points(rainGeometry, rainRainMaterial);
+        rainScene.add(rainSystem);
+
+        // --- 闪电环境爆闪层 ---
+        const lightningPlane = new THREE.Mesh(
+            new THREE.PlaneGeometry(30, 30), 
+            new THREE.MeshBasicMaterial({ color: 0xeef8ff, transparent: true, opacity: 0.0, depthWrite: false, blending: THREE.AdditiveBlending })
+        );
+        lightningPlane.position.z = 2; 
+        rainScene.add(lightningPlane);
+
+        // --- 具象电弧系统 ---
+        const maxLightningPoints = 200;
+        const boltGeometry = new THREE.BufferGeometry();
+        const boltPositions = new Float32Array(maxLightningPoints * 3);
+        boltGeometry.setAttribute('position', new THREE.BufferAttribute(boltPositions, 3));
+        
+        const boltMatCore = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.0, blending: THREE.AdditiveBlending });
+        const boltCore = new THREE.Line(boltGeometry, boltMatCore);
+        boltCore.position.z = 2.1;
+        
+        const boltMatGlow1 = new THREE.LineBasicMaterial({ color: 0x44aaff, transparent: true, opacity: 0.0, blending: THREE.AdditiveBlending });
+        const boltGlow1 = new THREE.Line(boltGeometry, boltMatGlow1);
+        boltGlow1.position.set(-0.03, 0, 2.05);
+        
+        const boltMatGlow2 = new THREE.LineBasicMaterial({ color: 0x44aaff, transparent: true, opacity: 0.0, blending: THREE.AdditiveBlending });
+        const boltGlow2 = new THREE.Line(boltGeometry, boltMatGlow2);
+        boltGlow2.position.set(0.03, 0, 2.05);
+
+        rainScene.add(boltCore);
+        rainScene.add(boltGlow1);
+        rainScene.add(boltGlow2);
+
+        function generateLightningBolt(pinchX, pinchY) {
+            const dist = rainCamera.position.z - boltCore.position.z; 
+            const vFOV = THREE.MathUtils.degToRad(rainCamera.fov);
+            const visibleHeight = 2 * Math.tan(vFOV / 2) * dist;
+            const visibleWidth = visibleHeight * rainCamera.aspect;
+
+            const startX = (pinchX - 0.5) * visibleWidth;
+            const startY = -(pinchY - 0.5) * visibleHeight;
+
+            let curX = startX;
+            let curY = startY;
+            let ptIdx = 0;
+
+            boltPositions[ptIdx * 3] = curX; boltPositions[ptIdx * 3 + 1] = curY; boltPositions[ptIdx * 3 + 2] = 0;
+            ptIdx++;
+
+            while(curY > -visibleHeight/2 && ptIdx < maxLightningPoints) {
+                curY -= (Math.random() * 0.4 + 0.1); 
+                curX += (Math.random() - 0.5) * 0.9; 
+                
+                boltPositions[ptIdx * 3] = curX; boltPositions[ptIdx * 3 + 1] = curY; boltPositions[ptIdx * 3 + 2] = 0;
+                ptIdx++;
+            }
+
+            for(let i = ptIdx; i < maxLightningPoints; i++) {
+                boltPositions[i * 3] = curX; boltPositions[i * 3 + 1] = curY; boltPositions[i * 3 + 2] = 0;
+            }
+
+            boltGeometry.attributes.position.needsUpdate = true;
+            boltMatCore.opacity = 1.0; 
+            boltMatGlow1.opacity = 0.8;
+            boltMatGlow2.opacity = 0.8;
+        }
+
+        window.addEventListener('resize', () => {
+            rainCamera.aspect = window.innerWidth / window.innerHeight;
+            rainCamera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            bgMaterial.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
+        });
+
+        // ==========================================
+        // 3. MediaPipe 交互逻辑
+        // ==========================================
+        const webcamVideoElement = document.getElementById('webcam-video');
+        const debugCanvasElement = document.getElementById('debug-canvas');
+        const debugCanvasCtx = debugCanvasElement.getContext('2d');
+
+        let targetRainLevel = 0.0; 
+        let isLightningTriggered = false; 
+        let targetPinchX = 0.5;
+        let targetPinchY = 0.5;
+        let wasRightHandPinching = false; 
+
+        function getDist(p1, p2) { return Math.hypot(p1.x - p2.x, p1.y - p2.y); }
+
+        function onResults(results) {
+            debugCanvasCtx.save();
+            debugCanvasCtx.clearRect(0, 0, debugCanvasElement.width, debugCanvasElement.height);
+
+            let leftHandDetected = false;
+            let currentLeftOpenness = 0.0;
+            let leftFistDetected = false;
+            let rightPinching = false;
+
+            if (results.multiHandLandmarks && results.multiHandedness) {
+                for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                    const landmarks = results.multiHandLandmarks[i];
+                    const label = results.multiHandedness[i].label; 
+
+                    drawConnectors(debugCanvasCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 2});
+                    drawLandmarks(debugCanvasCtx, landmarks, {color: '#FF0000', lineWidth: 1, radius: 3});
+
+                    const wrist = landmarks[0];
+
+                    if (label === 'Right') { 
+                        leftHandDetected = true;
+                        if (getDist(landmarks[8], wrist) < 0.25 && getDist(landmarks[12], wrist) < 0.25 && 
+                            getDist(landmarks[16], wrist) < 0.25 && getDist(landmarks[20], wrist) < 0.25) {
+                            leftFistDetected = true;
+                        } else {
+                            const dist = getDist(landmarks[4], landmarks[20]);
+                            currentLeftOpenness = Math.max(0, Math.min(1, (dist - 0.1) / 0.3));
+                        }
+                    }
+
+                    if (label === 'Left') { 
+                        const pinchDist = getDist(landmarks[8], landmarks[4]);
+                        if (pinchDist < 0.08) {
+                            rightPinching = true;
+                            const centerX = (landmarks[8].x + landmarks[4].x) / 2;
+                            const centerY = (landmarks[8].y + landmarks[4].y) / 2;
+                            targetPinchX = 1.0 - centerX; 
+                            targetPinchY = centerY;
+                        }
+                    }
+                }
+            }
+
+            if (!leftHandDetected || leftFistDetected) {
+                targetRainLevel = 0.0;
+            } else {
+                targetRainLevel = currentLeftOpenness;
+            }
+
+            if (rightPinching && !wasRightHandPinching) {
+                isLightningTriggered = true;
+            }
+            wasRightHandPinching = rightPinching; 
+
+            debugCanvasCtx.restore();
+        }
+
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+        hands.onResults(onResults);
+
+        const cameraFeed = new Camera(webcamVideoElement, {
+            onFrame: async () => { await hands.send({image: webcamVideoElement}); },
+            width: 640, height: 480
+        });
+        
+        cameraFeed.start();
+
+        // ==========================================
+        // 4. 动画与渲染主循环
+        // ==========================================
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const fadeSpeed = targetRainLevel === 0.0 ? 0.3 : 0.05;
+            rainRainMaterial.uniforms.uOpacity.value += (targetRainLevel - rainRainMaterial.uniforms.uOpacity.value) * fadeSpeed;
+            bgMaterial.uniforms.uRainLevel.value += (targetRainLevel - bgMaterial.uniforms.uRainLevel.value) * fadeSpeed;
+
+            if (rainSound.isPlaying) {
+                const currentVol = rainSound.getVolume();
+                rainSound.setVolume(currentVol + (targetRainLevel - currentVol) * fadeSpeed);
+            }
+            
+            if (isLightningTriggered) {
+                lightningPlane.material.opacity = 0.85; 
+                generateLightningBolt(targetPinchX, targetPinchY); 
+                
+                if (thunderSound.isPlaying) thunderSound.stop();
+                thunderSound.play();
+
+                isLightningTriggered = false; 
+            }
+            
+            if (lightningPlane.material.opacity > 0) {
+                lightningPlane.material.opacity = Math.max(0.0, lightningPlane.material.opacity - 0.08); 
+            }
+            if (boltMatCore.opacity > 0) {
+                const boltDecay = 0.1; 
+                boltMatCore.opacity = Math.max(0.0, boltMatCore.opacity - boltDecay); 
+                boltMatGlow1.opacity = Math.max(0.0, boltMatGlow1.opacity - boltDecay);
+                boltMatGlow2.opacity = Math.max(0.0, boltMatGlow2.opacity - boltDecay);
+            }
+
+            const positions = rainGeometry.attributes.position.array;
+            for (let i = 0; i < rainCount; i++) {
+                positions[i * 3 + 1] -= rainVelocities[i]; 
+                positions[i * 3] += 0.015; 
+                if (positions[i * 3 + 1] < -10) {
+                    positions[i * 3 + 1] = 10;
+                    positions[i * 3] = (Math.random() - 0.5) * 30; 
+                }
+            }
+            rainGeometry.attributes.position.needsUpdate = true;
+
+            renderer.clear();
+            renderer.render(bgScene, bgCamera);
+            renderer.render(rainScene, rainCamera);
+        }
+
+        animate();
+    </script>
+</body>
+</html>
